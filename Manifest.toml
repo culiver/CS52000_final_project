@@ -2,7 +2,7 @@
 
 julia_version = "1.11.4"
 manifest_format = "2.0"
-project_hash = "38609107db80ceb48d322e1375f1c50b03c1f0fb"
+project_hash = "a10d900d938f65333bb9683c1ae3259b11b20fe4"
 
 [[deps.ArgTools]]
 uuid = "0dad84c5-d112-42e6-8d28-ef12dabb789f"
@@ -182,6 +182,18 @@ deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "LazyArtifac
 git-tree-sha1 = "e94f84da9af7ce9c6be049e9067e511e17ff89ec"
 uuid = "0234f1f7-429e-5d53-9886-15a909be8d59"
 version = "1.14.6+0"
+
+[[deps.HiGHS]]
+deps = ["HiGHS_jll", "MathOptInterface", "PrecompileTools", "SparseArrays"]
+git-tree-sha1 = "219becee955e18b349be83d74bdd2e5ad4804d0f"
+uuid = "87dc4568-4c63-4d18-b0c0-bb2238e4078b"
+version = "1.15.0"
+
+[[deps.HiGHS_jll]]
+deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "Libdl", "Zlib_jll"]
+git-tree-sha1 = "72bceb63d4ae3683f091f812b6958a199c494a1b"
+uuid = "8fd58aa0-07eb-5a78-9b36-339c94fd15ea"
+version = "1.10.0+0"
 
 [[deps.Hwloc_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl"]
