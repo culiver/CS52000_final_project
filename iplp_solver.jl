@@ -291,11 +291,12 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
     d = xs ./ max.(s, 1e-8)
     D = Diagonal(d)
     
-    delta_x = 1e-8
-    delta_s = 1e-8
+    # Regularization parameters - now properly defined as scalars
+    delta_x_param = 1e-8
+    delta_s_param = 1e-8
     
     rhs = r_p .- As * (D * r_d)
-    reg_matrix = As * D * As' + delta_s * I
+    reg_matrix = As * D * As' + delta_s_param * I(size(As,1))
     delta_lam_aff = zeros(size(As, 1))
     localF = nothing
     try
@@ -365,9 +366,9 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
     
     @printf("%4d | %.2e | %.2e | %.2e | %.4f | %.4f\n", iter, primal_res_norm, dual_res_norm, mu, alpha_primal, alpha_dual)
     
-    xs += alpha_primal * delta_xs
-    lam += alpha_dual * delta_lam
-    s += alpha_dual * delta_s
+    xs = xs .+ (alpha_primal * delta_xs)
+    lam = lam .+ (alpha_dual * delta_lam)
+    s = s .+ (alpha_dual * delta_s)
     
     if any(xs .<= 0) || any(s .<= 0)
       println("Warning: Numerical issues; enforcing positivity")
@@ -418,8 +419,9 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
   println("  Constraint violation: $original_constraint_violation")
   println("  Bound violation: $bound_violation")
   
-  lam = Vector(lam)
-  s = Vector(s)
+  # Convert to Vector properly
+  lam = vec(Array(lam))
+  s = vec(Array(s))
   
   return IplpSolution(x, converged, cs, As, bs, xs, lam, s)
 end
