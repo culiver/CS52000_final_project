@@ -73,8 +73,8 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
   A = Problem.A
   b_orig = Problem.b
   c_orig = Problem.c
-  lo = Problem.lo
-  hi = Problem.hi
+  lo = copy(Problem.lo)
+  hi = copy(Problem.hi)
   n = length(c_orig)
   m = size(A, 1)
   
@@ -82,6 +82,20 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
   if n == 0 || m == 0
     println("Error: Empty problem detected")
     return IplpSolution(Float64[], false, Float64[], spzeros(0,0), Float64[], Float64[], Float64[], Float64[])
+  end
+  
+  # ---------------------------------------------------------------------------
+  # Treat Large Bounds as Infinity (HiGHS convention)
+  # Any upper bound ≥ 1e20 will be treated as +Inf.
+  # Any lower bound ≤ -1e20 will be treated as -Inf.
+  threshold = 1e20
+  for i in 1:n
+    if hi[i] ≥ threshold
+      hi[i] = Inf
+    end
+    if lo[i] ≤ -threshold
+      lo[i] = -Inf
+    end
   end
   
   # Determine how many extra columns and extra equality rows we need.
@@ -133,7 +147,7 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
   for i in 1:n
     if isfinite(lo[i])
       b_adj .-= A[:, i] * lo[i]
-    elseif !isfinite(lo[i]) && isfinite(hi[i])
+    elseif (!isfinite(lo[i])) && isfinite(hi[i])
       b_adj .-= A[:, i] * hi[i]
     end
     # For bounded variables, subtract the lower bound only.
@@ -143,8 +157,8 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
   # ---------------------------------------------------------------------------
   # Fill in the columns corresponding to each variable.
   #
-  # We loop over each variable i and insert the appropriate columns into As, set
-  # the corresponding entries of cs, and record the transformation.
+  # We loop over each variable i and insert the appropriate columns into As,
+  # set the corresponding entries of cs, and record the transformation.
   #
   # For the original constraints (rows 1:m):
   # - Bounded & lower: multiply by +1.
