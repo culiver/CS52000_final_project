@@ -65,160 +65,193 @@ or if the iteration count exceeds maxit.
 function iplp(Problem::IplpProblem, tol; maxit=100)
   println("Starting interior-point method with tolerance: $tol, max iterations: $maxit")
   
-  # Step 1: Problem Setup and Standardization
-  # Extract problem data
+  # ---------------------------------------------------------------------------
+  # Step 1: Problem Setup and Conversion to Standard Form
+  # ---------------------------------------------------------------------------
+  
+  # Extract original data.
   A = Problem.A
-  b = Problem.b
-  c = Problem.c
+  b_orig = Problem.b
+  c_orig = Problem.c
   lo = Problem.lo
   hi = Problem.hi
-  
-  n = length(c)
+  n = length(c_orig)
   m = size(A, 1)
   
   println("Problem dimensions: $n variables, $m constraints")
-  
-  # Check for basic problem validity
   if n == 0 || m == 0
     println("Error: Empty problem detected")
     return IplpSolution(Float64[], false, Float64[], spzeros(0,0), Float64[], Float64[], Float64[], Float64[])
   end
   
-  # Convert to standard form (min c'x s.t. Ax = b, x ≥ 0)
-  # Create arrays for the standardized problem
-  num_bound_constraints = count(isfinite, lo) + count(isfinite, hi)
-  num_std_vars = n + num_bound_constraints  # Original vars + slack vars
+  # We now convert the problem to standard form:
+  #   min cs'*xs   subject to   As * xs = bs, xs >= 0
+  # For variables in the original problem, we use different transformations:
+  #
+  # 1. Bounded variable (finite lo and hi): 
+  #      x = x' + lo, with 0 <= x' <= hi - lo.
+  #      To enforce the upper bound, we add an extra equality: 
+  #           x' + s = hi - lo,  s >= 0.
+  # 2. Lower-bound only (finite lo): 
+  #      x = x' + lo, with x' >= 0.
+  # 3. Upper-bound only (finite hi): 
+  #      x = hi - x', with x' >= 0.
+  # 4. Free variable (no finite bounds): 
+  #      x = x⁺ - x⁻, with x⁺, x⁻ >= 0.
+  #
+  # We also build a mapping (var_map) so that later we can recover the original variable x.
+  # For each original variable i, var_map[i] will hold:
+  #   (:bounded, col)  -- for finite lo and hi, where col is the column index of x'
+  #   (:lower, col)    -- for lower bound only
+  #   (:upper, col)    -- for upper bound only
+  #   (:free, col_plus, col_minus)  -- for free variable.
   
-  println("Converting to standard form (estimated $num_std_vars variables)")
+  extra_rows = 0  # additional rows for bounded variables’ upper-bound constraints
+  num_std_vars = 0
+  var_map = Vector{Any}(undef, n)
   
-  # Initialize standard form components
-  As = spzeros(m, num_std_vars)
-  cs = zeros(num_std_vars)
-  bs = copy(b)
-  
-  # Set up variable mapping from original to standard form
-  var_map = zeros(Int, n)
-  next_var_idx = 1
-  
-  # Process each variable and handle bounds
   for i in 1:n
-    if isfinite(lo[i]) && lo[i] != 0
-      # Shift variable: x_i = x_i' + lo[i]
-      bs .-= A[:,i] * lo[i]
-    end
-    
     if isfinite(lo[i]) && isfinite(hi[i])
-      # Bounded variable: lo[i] ≤ x_i ≤ hi[i]
-      # Substitute x_i = x_i' + lo[i] where 0 ≤ x_i' ≤ hi[i] - lo[i]
-      As[:,next_var_idx] = A[:,i]
-      cs[next_var_idx] = c[i]
-      var_map[i] = next_var_idx
-      next_var_idx += 1
+      extra_rows += 1          # one extra equality row for the upper-bound constraint
+      num_std_vars += 2        # one column for the shifted variable and one for its slack
+      var_map[i] = (:bounded, num_std_vars - 1)  # store index of the shifted variable (x')
     elseif isfinite(lo[i])
-      # Lower bound only: x_i ≥ lo[i]
-      As[:,next_var_idx] = A[:,i]
-      cs[next_var_idx] = c[i]
-      var_map[i] = next_var_idx
-      next_var_idx += 1
+      num_std_vars += 1
+      var_map[i] = (:lower, num_std_vars)
     elseif isfinite(hi[i])
-      # Upper bound only: x_i ≤ hi[i]
-      # Substitute x_i = hi[i] - x_i' where x_i' ≥ 0
-      As[:,next_var_idx] = -A[:,i]
-      cs[next_var_idx] = -c[i]
-      bs .-= A[:,i] * hi[i]
-      var_map[i] = next_var_idx
-      next_var_idx += 1
+      num_std_vars += 1
+      var_map[i] = (:upper, num_std_vars)
     else
-      # Free variable: -∞ < x_i < ∞
-      # Substitute x_i = x_i⁺ - x_i⁻ where x_i⁺, x_i⁻ ≥ 0
-      As[:,next_var_idx] = A[:,i]
-      cs[next_var_idx] = c[i]
-      var_map[i] = next_var_idx
-      next_var_idx += 1
-      
-      As[:,next_var_idx] = -A[:,i]
-      cs[next_var_idx] = -c[i]
-      next_var_idx += 1
+      num_std_vars += 2
+      var_map[i] = (:free, num_std_vars - 1, num_std_vars)
     end
   end
   
-  # Adjust dimensions if needed
-  As = As[:, 1:next_var_idx-1]
-  cs = cs[1:next_var_idx-1]
+  total_rows = m + extra_rows  # original m equations plus one for each bounded variable
   
-  # Check if the standardized problem is well-formed
-  n_std = size(As, 2)  # Number of variables in standard form
-  println("Standard form: $n_std variables, $m equality constraints")
+  println("Converting to standard form: $num_std_vars standard variables, $total_rows equality constraints")
   
-  if n_std == 0
-    println("Error: No variables in standard form")
-    return IplpSolution(Float64[], false, Float64[], spzeros(0,0), Float64[], Float64[], Float64[], Float64[])
+  # Initialize standard form arrays.
+  As = spzeros(total_rows, num_std_vars)
+  cs = zeros(num_std_vars)
+  bs = zeros(total_rows)
+  
+  # For the original m constraint rows, adjust b for lower/upper shifts.
+  b_adj = copy(b_orig)
+  for i in 1:n
+    if isfinite(lo[i])
+      # For both bounded and lower-only variables, subtract A[:, i] * lo[i]
+      b_adj .-= A[:, i] * lo[i]
+    end
+    if (!isfinite(lo[i])) && isfinite(hi[i])
+      # For upper-bound–only variables: x = hi - x', so subtract A[:, i] * hi[i]
+      b_adj .-= A[:, i] * hi[i]
+    end
+  end
+  bs[1:m] = b_adj  # first m rows are from the original constraints
+  
+  # Now fill in the columns for each variable.
+  extra_row_index = m  # next available extra row is at index m+1
+  next_var_idx = 1     # next available standard variable column
+  
+  for i in 1:n
+    if var_map[i][1] == :bounded
+      # For variables with both finite lo and hi:
+      # Transformation: x = x' + lo, with 0 <= x' <= hi - lo,
+      # and enforce x' + s = hi - lo.
+      local_col = var_map[i][2]  # index for x' (shifted variable)
+      # Main constraint: add A[:,i] * x'
+      As[1:m, local_col] = A[:, i]
+      cs[local_col] = c_orig[i]
+      # Now add the extra row constraint for the upper bound:
+      extra_row_index += 1
+      # In the extra row, we enforce: x' + slack = hi - lo.
+      # x' is in column "local_col", and the slack is the next column.
+      As[extra_row_index, local_col] = 1.0
+      As[extra_row_index, local_col+1] = 1.0
+      bs[extra_row_index] = hi[i] - lo[i]
+      cs[local_col+1] = 0.0   # slack variable has zero cost
+      next_var_idx = max(next_var_idx, local_col+2)
+    elseif var_map[i][1] == :lower
+      # Lower-bound only: x = x' + lo, with x' >= 0.
+      local_col = var_map[i][2]
+      As[1:m, local_col] = A[:, i]
+      cs[local_col] = c_orig[i]
+      next_var_idx = max(next_var_idx, local_col+1)
+    elseif var_map[i][1] == :upper
+      # Upper-bound only: x = hi - x', with x' >= 0.
+      local_col = var_map[i][2]
+      As[1:m, local_col] = -A[:, i]  # note the negative sign
+      cs[local_col] = -c_orig[i]
+      next_var_idx = max(next_var_idx, local_col+1)
+    elseif var_map[i][1] == :free
+      # Free variable: x = x⁺ - x⁻, with both components >= 0.
+      local_plus = var_map[i][2]
+      local_minus = var_map[i][3]
+      As[1:m, local_plus] = A[:, i]
+      As[1:m, local_minus] = -A[:, i]
+      cs[local_plus] = c_orig[i]
+      cs[local_minus] = -c_orig[i]
+      next_var_idx = max(next_var_idx, local_minus+1)
+    end
   end
   
-  # Step 2: Initialization
+  # Truncate cs if we allocated extra space.
+  cs = cs[1:next_var_idx-1]
+  As = As[:, 1:next_var_idx-1]
+  println("Standard form: $(size(As,2)) variables, $(size(As,1)) equality constraints")
+  
+  # ---------------------------------------------------------------------------
+  # Step 2: Initialization of the Interior-Point Method
+  # ---------------------------------------------------------------------------
+  
   println("Initializing interior point")
-  
-  # Apply scaling to improve numerical stability
-  println("Scaling problem data for numerical stability")
-  
-  # Scale rows of As to have unit norm
+  # Scaling for numerical stability
   row_norms = zeros(m)
   for i in 1:m
-    row_norms[i] = norm(As[i,:])
-    if row_norms[i] > 1e-10
-      As[i,:] ./= row_norms[i]
-      bs[i] /= row_norms[i]
+    row_norm = norm(As[i, :])
+    row_norms[i] = row_norm
+    if row_norm > 1e-10
+      As[i, :] ./= row_norm
+      bs[i] /= row_norm
     end
   end
   
-  # Scale columns of As to have unit norm where possible
+  n_std = size(As, 2)
+  # (Note: we do not scale extra rows in this snippet, though one could scale them separately.)
   col_norms = zeros(n_std)
   for j in 1:n_std
-    col_norms[j] = norm(As[:,j])
-    if col_norms[j] > 1e-10
-      As[:,j] ./= col_norms[j]
-      cs[j] *= col_norms[j]  # Adjust objective coefficients
+    col_norm = norm(As[:, j])
+    col_norms[j] = col_norm
+    if col_norm > 1e-10
+      As[:, j] ./= col_norm
+      cs[j] *= col_norm  # adjust objective coefficients
     end
   end
   
-  # Step 2: Initialization
-  println("Initializing interior point")
-  
-  # Compute a feasible starting point
-  # Try to find a point close to the central path
+  # Initialization for variables:
   xs = ones(n_std)
-  
-  # Set dual variables based on the objective
-  lam = zeros(m)
+  lam = zeros(size(As, 1))
   s = ones(n_std)
   
-  # Apply Mehrotra's initial point heuristic
-  # Solve for lam to minimize ||As'*lam - c||
+  # Use a heuristic to initialize dual variables based on the objective:
   try
     lam = (As * As') \ (As * cs)
   catch
-    println("Warning: Could not compute optimal initial dual variables, using zeros")
+    println("Warning: Could not compute optimal initial dual variables; using zeros")
   end
-  
-  # Compute initial slack variables
   s = max.(cs .- As' * lam, 1e-1)
   
-  # Adjust primal variables to be compatible with slacks
-  xs = ones(n_std)
-  
-  # Optional: Compute a better initial point if needed
   initial_mu = dot(xs, s) / n_std
   println("Initial duality measure: $initial_mu")
   
-  # Step 3: Set Parameters
-  # Safety factor for step length
-  alpha_safety = 0.9995
+  # ---------------------------------------------------------------------------
+  # Step 3: Main Loop of Mehrotra's Predictor-Corrector Method
+  # ---------------------------------------------------------------------------
   
-  # Step 4: Main Loop
+  alpha_safety = 0.9995
   converged = false
   iter = 0
-  
-  # Track best solution found
   best_x = copy(xs)
   best_residual = Inf
   
@@ -228,231 +261,174 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
   
   while iter < maxit
     iter += 1
+    r_p = As * xs .- bs                   # primal residual
+    r_d = cs .- As' * lam .- s            # dual residual
+    mu = dot(xs, s) / n_std
     
-    # 4.1 Compute residuals
-    r_p = As * xs .- bs   # Primal residual
-    r_d = cs .- As' * lam .- s  # Dual residual
-    mu = dot(xs, s) / n_std    # Complementarity gap
-    
-    # Calculate residual norms for reporting
     primal_res_norm = norm(r_p) / max(1.0, norm(bs))
     dual_res_norm = norm(r_d) / max(1.0, norm(cs))
     total_res_norm = norm([r_p; r_d; xs .* s]) / max(1.0, norm([bs; cs]))
     
-    # Check convergence
     if total_res_norm <= tol && mu <= tol
       converged = true
-      @printf("%4d | %.2e | %.2e | %.2e | CONVERGED\n", 
-              iter, primal_res_norm, dual_res_norm, mu)
+      @printf("%4d | %.2e | %.2e | %.2e | CONVERGED\n", iter, primal_res_norm, dual_res_norm, mu)
       break
     end
     
-    # Track best solution
     if total_res_norm < best_residual
       best_residual = total_res_norm
       best_x = copy(xs)
     end
     
-    # 4.2 Compute affine scaling (predictor) direction
-    # Form diagonal matrices
+    # Predictor step
     X = Diagonal(xs)
     S = Diagonal(s)
-    
-    # Compute the scaling matrix D = X/S with safeguards
     d = xs ./ max.(s, 1e-8)
     D = Diagonal(d)
     
-    # Add regularization to improve conditioning
     delta_x = 1e-8
     delta_s = 1e-8
     
-    # Solve the normal equations
-    # (As*D*As' + delta_s*I) dlam = rhs
     rhs = r_p .- As * (D * r_d)
-    
-    # Create the regularized normal equations matrix
     reg_matrix = As * D * As' + delta_s * I
-    
-    # Use try-catch for numerical stability issues
-    delta_lam_aff = zeros(m)
-    local F = nothing
+    delta_lam_aff = zeros(size(As, 1))
+    localF = nothing
     try
-      # Add regularization to the normal equations matrix
-      F = cholesky(Symmetric(reg_matrix))
-      delta_lam_aff = F \ rhs
+      localF = cholesky(Symmetric(reg_matrix))
+      delta_lam_aff = localF \ rhs
     catch e
-      # If Cholesky fails, try a more robust but slower method
       println("  Warning: Cholesky factorization failed, using QR")
       delta_lam_aff = reg_matrix \ rhs
     end
     
-    # Recover the other directions with regularization
     delta_s_aff = r_d .+ As' * delta_lam_aff
     delta_xs_aff = -D * delta_s_aff
     
-    # 4.3 Compute maximum step lengths
     alpha_primal_aff = compute_step_length(xs, delta_xs_aff)
     alpha_dual_aff = compute_step_length(s, delta_s_aff)
     
-    # 4.4 Calculate affine duality gap
     xs_aff = xs .+ alpha_primal_aff * delta_xs_aff
     s_aff = s .+ alpha_dual_aff * delta_s_aff
     mu_aff = dot(xs_aff, s_aff) / n_std
     
-    # 4.5 Set centering parameter (Mehrotra's heuristic)
     sigma = (mu_aff / mu)^3
     
-    # 4.6 Compute corrector direction
-    # Compute correction term for complementarity
     comp_correction = delta_xs_aff .* delta_s_aff .- sigma * mu
-    
-    # Modify the right-hand side for the corrector step
     rhs_cor = -As * (D * comp_correction)
     
-    # Solve the corrector system using the same factorization
-    delta_lam_cor = zeros(m)
+    delta_lam_cor = zeros(size(As, 1))
     try
-      # Use the same regularized matrix if F exists
-      if F !== nothing
-        delta_lam_cor = F \ rhs_cor
+      if localF !== nothing
+        delta_lam_cor = localF \ rhs_cor
       else
         delta_lam_cor = reg_matrix \ rhs_cor
       end
     catch e
-      # If reusing factorization fails, solve again
       delta_lam_cor = reg_matrix \ rhs_cor
     end
     
-    # Recover the corrector directions
     delta_s_cor = As' * delta_lam_cor
     delta_xs_cor = -D * (delta_s_cor .+ comp_correction)
     
-    # 4.7 Combine directions
     delta_xs = delta_xs_aff .+ delta_xs_cor
     delta_lam = delta_lam_aff .+ delta_lam_cor
     delta_s = delta_s_aff .+ delta_s_cor
     
-    # 4.8 Compute step lengths with safety factor
     alpha_primal = alpha_safety * compute_step_length(xs, delta_xs)
     alpha_dual = alpha_safety * compute_step_length(s, delta_s)
     
-    # Ensure minimum step size to make progress
     min_step = 1e-5
     if alpha_primal < min_step && alpha_dual < min_step
-      # If both step lengths are too small, use Mehrotra's heuristic
-      # to make a pure centering step
       println("  Warning: Step sizes too small, taking centering step")
-      sigma = 0.8  # Heavy centering
-      comp_correction = .-sigma * mu
-      
-      # Solve for a pure centering direction
+      sigma = 0.8
+      comp_correction = -sigma * mu
       rhs_cor = -As * (D * comp_correction)
       try
-        if F !== nothing
-          delta_lam = F \ rhs_cor
+        if localF !== nothing
+          delta_lam = localF \ rhs_cor
         else
           delta_lam = reg_matrix \ rhs_cor
         end
       catch
         delta_lam = reg_matrix \ rhs_cor
       end
-      
       delta_s = As' * delta_lam
       delta_xs = -D * (delta_s .+ comp_correction)
-      
-      # Recompute step lengths
       alpha_primal = alpha_safety * compute_step_length(xs, delta_xs)
       alpha_dual = alpha_safety * compute_step_length(s, delta_s)
     end
     
-    # Print iteration status
-    @printf("%4d | %.2e | %.2e | %.2e | %.4f | %.4f\n", 
-            iter, primal_res_norm, dual_res_norm, mu, alpha_primal, alpha_dual)
+    @printf("%4d | %.2e | %.2e | %.2e | %.4f | %.4f\n", iter, primal_res_norm, dual_res_norm, mu, alpha_primal, alpha_dual)
     
-    # 4.9 Update iterates
-    xs = xs .+ alpha_primal * delta_xs
-    lam = lam .+ alpha_dual * delta_lam
-    s = s .+ alpha_dual * delta_s
+    xs += alpha_primal * delta_xs
+    lam += alpha_dual * delta_lam
+    s += alpha_dual * delta_s
     
-    # Additional check to prevent numerical issues
     if any(xs .<= 0) || any(s .<= 0)
       println("Warning: Numerical issues detected, variables not strictly positive")
-      # Fix negative values
       xs = max.(xs, 1e-10)
       s = max.(s, 1e-10)
     end
   end
   
-  # If we didn't converge, use the best solution found
   if !converged
     println("Maximum iterations reached without convergence.")
     println("Using best solution with residual: $best_residual")
     xs = best_x
   end
   
-  # Step 5: Recover original solution
-  # Map xs back to original variables
+  # ---------------------------------------------------------------------------
+  # Step 4: Recover the Original Solution
+  # ---------------------------------------------------------------------------
+  
   x = zeros(n)
   
   println("Recovering solution in original variable space")
-  
   for i in 1:n
-    if var_map[i] > 0
-      x[i] = xs[var_map[i]]
-      
-      # Apply any shift if the variable was bounded from below
-      if isfinite(lo[i]) && lo[i] != 0
-        x[i] += lo[i]
-      end
-      
-      # If variable was x = hi - x', reverse the transformation
-      if isfinite(hi[i]) && !isfinite(lo[i])
-        x[i] = hi[i] .- x[i]
-      end
-    else
-      # Handle split free variables if necessary (x = x⁺ - x⁻)
-      pos_idx = findfirst(j -> j > 0 && As[:,j] == A[:,i], 1:n_std)
-      neg_idx = findfirst(j -> j > 0 && As[:,j] == -A[:,i], 1:n_std)
-      
-      if pos_idx !== nothing && neg_idx !== nothing
-        x[i] = xs[pos_idx] .- xs[neg_idx]
-      end
+    if var_map[i][1] == :bounded
+      # For bounded variable, x = x' + lo.
+      # (The extra slack variable is not part of the original variable.)
+      idx = var_map[i][2]
+      x[i] = xs[idx] + lo[i]
+    elseif var_map[i][1] == :lower
+      idx = var_map[i][2]
+      x[i] = xs[idx] + lo[i]
+    elseif var_map[i][1] == :upper
+      idx = var_map[i][2]
+      x[i] = hi[i] - xs[idx]
+    elseif var_map[i][1] == :free
+      idx_plus = var_map[i][2]
+      idx_minus = var_map[i][3]
+      x[i] = xs[idx_plus] - xs[idx_minus]
     end
   end
   
-  # Check solution feasibility in original space
-  original_constraint_violation = norm(A * x .- b) / max(1.0, norm(b))
+  # Check constraint and bound violations.
+  original_constraint_violation = norm(A * x - b_orig) / max(1.0, norm(b_orig))
   bound_violation = 0.0
   for i in 1:n
     if isfinite(lo[i]) && x[i] < lo[i] - 1e-8
-      bound_violation = max(bound_violation, lo[i] .- x[i])
+      bound_violation = max(bound_violation, lo[i] - x[i])
     end
     if isfinite(hi[i]) && x[i] > hi[i] + 1e-8
-      bound_violation = max(bound_violation, x[i] .- hi[i])
+      bound_violation = max(bound_violation, x[i] - hi[i])
     end
   end
   
-  # Report solution quality
   println("Solution quality in original space:")
-  println("  Objective value: $(dot(c, x))")
+  println("  Objective value: $(dot(c_orig, x))")
   println("  Constraint violation: $original_constraint_violation")
   println("  Bound violation: $bound_violation")
   
-  # Ensure all output values are the correct type
-  if isa(lam, SparseMatrixCSC)
-    lam = Vector(vec(lam))
-  end
-  if isa(s, SparseMatrixCSC)
-    s = Vector(vec(s))
-  end
+  # Ensure output types are correct.
+  lam = Vector(lam)
+  s = Vector(s)
   
-  # Return solution
   return IplpSolution(x, converged, cs, As, bs, xs, lam, s)
 end
 
-# Helper function to compute maximum step length
+# Helper function to compute maximum step length.
 function compute_step_length(x, dx)
-  # Find the maximum alpha in [0,1] such that x + alpha*dx >= 0
   alpha = 1.0
   for i in 1:length(x)
     if dx[i] < 0
@@ -467,7 +443,6 @@ end
 # =============================================================================
 
 # Download an LP problem from LPnetlib.
-# The matrix identifier "LPnetlib/lp_afiro" should appear in the available list.
 md = mdopen("LPnetlib/lp_afiro")
 println("LPnetlib/lp_afiro matrix size: ", size(md.A))
 
