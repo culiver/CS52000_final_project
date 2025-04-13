@@ -84,37 +84,26 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
     return IplpSolution(Float64[], false, Float64[], spzeros(0,0), Float64[], Float64[], Float64[], Float64[])
   end
   
-  # We now convert the problem to standard form:
-  #   min cs'*xs   subject to   As * xs = bs, xs >= 0
-  # For variables in the original problem, we use different transformations:
-  #
-  # 1. Bounded variable (finite lo and hi): 
-  #      x = x' + lo, with 0 <= x' <= hi - lo.
-  #      To enforce the upper bound, we add an extra equality: 
-  #           x' + s = hi - lo,  s >= 0.
-  # 2. Lower-bound only (finite lo): 
-  #      x = x' + lo, with x' >= 0.
-  # 3. Upper-bound only (finite hi): 
-  #      x = hi - x', with x' >= 0.
-  # 4. Free variable (no finite bounds): 
-  #      x = x⁺ - x⁻, with x⁺, x⁻ >= 0.
-  #
-  # We also build a mapping (var_map) so that later we can recover the original variable x.
-  # For each original variable i, var_map[i] will hold:
-  #   (:bounded, col)  -- for finite lo and hi, where col is the column index of x'
-  #   (:lower, col)    -- for lower bound only
-  #   (:upper, col)    -- for upper bound only
-  #   (:free, col_plus, col_minus)  -- for free variable.
-  
-  extra_rows = 0  # additional rows for bounded variables’ upper-bound constraints
+  # Determine how many extra columns and extra equality rows we need.
+  # The transformations are as follows:
+  # 1. Bounded (finite lo and hi): need 2 columns (x' and slack) and 1 extra equality constraint.
+  # 2. Lower only: need 1 column.
+  # 3. Upper only: need 1 column.
+  # 4. Free: need 2 columns (x⁺ and x⁻).
+  num_extra_eq = 0
   num_std_vars = 0
+  # var_map[i] will be:
+  #   (:bounded, col_x, col_slack)
+  #   (:lower, col)
+  #   (:upper, col)
+  #   (:free, col_plus, col_minus)
   var_map = Vector{Any}(undef, n)
   
   for i in 1:n
     if isfinite(lo[i]) && isfinite(hi[i])
-      extra_rows += 1          # one extra equality row for the upper-bound constraint
-      num_std_vars += 2        # one column for the shifted variable and one for its slack
-      var_map[i] = (:bounded, num_std_vars - 1)  # store index of the shifted variable (x')
+      num_std_vars += 2
+      num_extra_eq += 1
+      var_map[i] = (:bounded, num_std_vars - 1, num_std_vars)
     elseif isfinite(lo[i])
       num_std_vars += 1
       var_map[i] = (:lower, num_std_vars)
@@ -127,78 +116,81 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
     end
   end
   
-  total_rows = m + extra_rows  # original m equations plus one for each bounded variable
+  total_eq_rows = m + num_extra_eq  # original m eq. plus one extra eq per bounded variable.
   
-  println("Converting to standard form: $num_std_vars standard variables, $total_rows equality constraints")
+  println("Converting to standard form: $num_std_vars standard variables, $total_eq_rows equality constraints")
   
   # Initialize standard form arrays.
-  As = spzeros(total_rows, num_std_vars)
+  As = spzeros(total_eq_rows, num_std_vars)
   cs = zeros(num_std_vars)
-  bs = zeros(total_rows)
+  bs = zeros(total_eq_rows)
   
-  # For the original m constraint rows, adjust b for lower/upper shifts.
+  # ---------------------------------------------------------------------------
+  # Adjust the right-hand side for the original m constraints.
+  # For any variable with a finite lower bound, subtract A[:, i] * lo[i]
+  # For any variable with only an upper bound, subtract A[:, i] * hi[i]
   b_adj = copy(b_orig)
   for i in 1:n
     if isfinite(lo[i])
-      # For both bounded and lower-only variables, subtract A[:, i] * lo[i]
       b_adj .-= A[:, i] * lo[i]
-    end
-    if (!isfinite(lo[i])) && isfinite(hi[i])
-      # For upper-bound–only variables: x = hi - x', so subtract A[:, i] * hi[i]
+    elseif !isfinite(lo[i]) && isfinite(hi[i])
       b_adj .-= A[:, i] * hi[i]
     end
+    # For bounded variables, subtract the lower bound only.
   end
-  bs[1:m] = b_adj  # first m rows are from the original constraints
+  bs[1:m] = b_adj  # original constraints go into the first m rows.
   
-  # Now fill in the columns for each variable.
-  extra_row_index = m  # next available extra row is at index m+1
-  next_var_idx = 1     # next available standard variable column
-  
+  # ---------------------------------------------------------------------------
+  # Fill in the columns corresponding to each variable.
+  #
+  # We loop over each variable i and insert the appropriate columns into As, set
+  # the corresponding entries of cs, and record the transformation.
+  #
+  # For the original constraints (rows 1:m):
+  # - Bounded & lower: multiply by +1.
+  # - Upper only: multiply by -1.
+  # - Free: split into positive and negative parts.
+  #
+  # Then, for each bounded variable, add an extra equality row enforcing:
+  #   x'_i + slack_i = hi[i] - lo[i].
+  extra_eq_row = m  # next available extra equality row index.
   for i in 1:n
-    if var_map[i][1] == :bounded
-      # For variables with both finite lo and hi:
-      # Transformation: x = x' + lo, with 0 <= x' <= hi - lo,
-      # and enforce x' + s = hi - lo.
-      local_col = var_map[i][2]  # index for x' (shifted variable)
-      # Main constraint: add A[:,i] * x'
-      As[1:m, local_col] = A[:, i]
-      cs[local_col] = c_orig[i]
-      # Now add the extra row constraint for the upper bound:
-      extra_row_index += 1
-      # In the extra row, we enforce: x' + slack = hi - lo.
-      # x' is in column "local_col", and the slack is the next column.
-      As[extra_row_index, local_col] = 1.0
-      As[extra_row_index, local_col+1] = 1.0
-      bs[extra_row_index] = hi[i] - lo[i]
-      cs[local_col+1] = 0.0   # slack variable has zero cost
-      next_var_idx = max(next_var_idx, local_col+2)
-    elseif var_map[i][1] == :lower
-      # Lower-bound only: x = x' + lo, with x' >= 0.
-      local_col = var_map[i][2]
-      As[1:m, local_col] = A[:, i]
-      cs[local_col] = c_orig[i]
-      next_var_idx = max(next_var_idx, local_col+1)
-    elseif var_map[i][1] == :upper
-      # Upper-bound only: x = hi - x', with x' >= 0.
-      local_col = var_map[i][2]
-      As[1:m, local_col] = -A[:, i]  # note the negative sign
-      cs[local_col] = -c_orig[i]
-      next_var_idx = max(next_var_idx, local_col+1)
-    elseif var_map[i][1] == :free
-      # Free variable: x = x⁺ - x⁻, with both components >= 0.
-      local_plus = var_map[i][2]
-      local_minus = var_map[i][3]
-      As[1:m, local_plus] = A[:, i]
-      As[1:m, local_minus] = -A[:, i]
-      cs[local_plus] = c_orig[i]
-      cs[local_minus] = -c_orig[i]
-      next_var_idx = max(next_var_idx, local_minus+1)
+    trans = var_map[i][1]
+    if trans == :bounded
+      # Transformation: x = x' + lo, with 0 <= x' <= hi - lo.
+      # In original constraints, we use the column for x'.
+      col_x = var_map[i][2]   # column index for the shifted variable x'
+      As[1:m, col_x] = A[:, i]
+      cs[col_x] = c_orig[i]
+      # Add extra equality row for the upper bound.
+      extra_eq_row += 1
+      As[extra_eq_row, col_x] = 1.0
+      # The slack variable column is the next one.
+      col_slack = var_map[i][3]
+      As[extra_eq_row, col_slack] = 1.0
+      bs[extra_eq_row] = hi[i] - lo[i]
+      cs[col_slack] = 0.0   # slack variable has zero cost
+    elseif trans == :lower
+      # Lower bound only: x = x' + lo, so use the column directly.
+      col = var_map[i][2]
+      As[1:m, col] = A[:, i]
+      cs[col] = c_orig[i]
+    elseif trans == :upper
+      # Upper bound only: x = hi - x', so we use -A.
+      col = var_map[i][2]
+      As[1:m, col] = -A[:, i]
+      cs[col] = -c_orig[i]
+    elseif trans == :free
+      # Free variable: x = x⁺ - x⁻.
+      col_plus = var_map[i][2]
+      col_minus = var_map[i][3]
+      As[1:m, col_plus] = A[:, i]
+      As[1:m, col_minus] = -A[:, i]
+      cs[col_plus] = c_orig[i]
+      cs[col_minus] = -c_orig[i]
     end
   end
   
-  # Truncate cs if we allocated extra space.
-  cs = cs[1:next_var_idx-1]
-  As = As[:, 1:next_var_idx-1]
   println("Standard form: $(size(As,2)) variables, $(size(As,1)) equality constraints")
   
   # ---------------------------------------------------------------------------
@@ -206,39 +198,38 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
   # ---------------------------------------------------------------------------
   
   println("Initializing interior point")
-  # Scaling for numerical stability
+  # Scale original m rows for numerical stability.
   row_norms = zeros(m)
   for i in 1:m
-    row_norm = norm(As[i, :])
-    row_norms[i] = row_norm
-    if row_norm > 1e-10
-      As[i, :] ./= row_norm
-      bs[i] /= row_norm
+    rnorm = norm(As[i, :])
+    row_norms[i] = rnorm
+    if rnorm > 1e-10
+      As[i, :] ./= rnorm
+      bs[i] /= rnorm
     end
   end
   
   n_std = size(As, 2)
-  # (Note: we do not scale extra rows in this snippet, though one could scale them separately.)
+  # Scale all columns for numerical stability.
   col_norms = zeros(n_std)
   for j in 1:n_std
-    col_norm = norm(As[:, j])
-    col_norms[j] = col_norm
-    if col_norm > 1e-10
-      As[:, j] ./= col_norm
-      cs[j] *= col_norm  # adjust objective coefficients
+    cnorm = norm(As[:, j])
+    col_norms[j] = cnorm
+    if cnorm > 1e-10
+      As[:, j] ./= cnorm
+      cs[j] *= cnorm
     end
   end
   
-  # Initialization for variables:
+  # Initialization for the interior-point method.
   xs = ones(n_std)
   lam = zeros(size(As, 1))
   s = ones(n_std)
   
-  # Use a heuristic to initialize dual variables based on the objective:
   try
     lam = (As * As') \ (As * cs)
   catch
-    println("Warning: Could not compute optimal initial dual variables; using zeros")
+    println("Warning: Using zeros for initial dual variables")
   end
   s = max.(cs .- As' * lam, 1e-1)
   
@@ -280,7 +271,7 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
       best_x = copy(xs)
     end
     
-    # Predictor step
+    # Predictor step.
     X = Diagonal(xs)
     S = Diagonal(s)
     d = xs ./ max.(s, 1e-8)
@@ -297,7 +288,7 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
       localF = cholesky(Symmetric(reg_matrix))
       delta_lam_aff = localF \ rhs
     catch e
-      println("  Warning: Cholesky factorization failed, using QR")
+      println("  Warning: Cholesky failed, using QR")
       delta_lam_aff = reg_matrix \ rhs
     end
     
@@ -365,15 +356,14 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
     s += alpha_dual * delta_s
     
     if any(xs .<= 0) || any(s .<= 0)
-      println("Warning: Numerical issues detected, variables not strictly positive")
+      println("Warning: Numerical issues; enforcing positivity")
       xs = max.(xs, 1e-10)
       s = max.(s, 1e-10)
     end
   end
   
   if !converged
-    println("Maximum iterations reached without convergence.")
-    println("Using best solution with residual: $best_residual")
+    println("Maximum iterations reached. Using best solution with residual: $best_residual")
     xs = best_x
   end
   
@@ -382,24 +372,18 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
   # ---------------------------------------------------------------------------
   
   x = zeros(n)
-  
   println("Recovering solution in original variable space")
   for i in 1:n
-    if var_map[i][1] == :bounded
-      # For bounded variable, x = x' + lo.
-      # (The extra slack variable is not part of the original variable.)
-      idx = var_map[i][2]
-      x[i] = xs[idx] + lo[i]
-    elseif var_map[i][1] == :lower
-      idx = var_map[i][2]
-      x[i] = xs[idx] + lo[i]
-    elseif var_map[i][1] == :upper
-      idx = var_map[i][2]
-      x[i] = hi[i] - xs[idx]
-    elseif var_map[i][1] == :free
-      idx_plus = var_map[i][2]
-      idx_minus = var_map[i][3]
-      x[i] = xs[idx_plus] - xs[idx_minus]
+    trans = var_map[i][1]
+    if trans == :bounded
+      # x = x' + lo.
+      x[i] = xs[var_map[i][2]] + lo[i]
+    elseif trans == :lower
+      x[i] = xs[var_map[i][2]] + lo[i]
+    elseif trans == :upper
+      x[i] = hi[i] - xs[var_map[i][2]]
+    elseif trans == :free
+      x[i] = xs[var_map[i][2]] - xs[var_map[i][3]]
     end
   end
   
@@ -420,7 +404,6 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
   println("  Constraint violation: $original_constraint_violation")
   println("  Bound violation: $bound_violation")
   
-  # Ensure output types are correct.
   lam = Vector(lam)
   s = Vector(s)
   
