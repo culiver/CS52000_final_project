@@ -290,6 +290,8 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
     S = Diagonal(s)
     d = xs ./ max.(s, 1e-8)
     D = Diagonal(d)
+
+    println("D max: $(maximum(D)) min: $(minimum(D))")
     
     # Regularization parameters - now properly defined as scalars
     delta_x_param = 1e-8
@@ -318,6 +320,7 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
     mu_aff = dot(xs_aff, s_aff) / n_std
     
     sigma = (mu_aff / mu)^3
+    println("mu_aff: $mu_aff sigma: $sigma")
     
     comp_correction = delta_xs_aff .* delta_s_aff .- sigma * mu
     rhs_cor = -As * (D * comp_correction)
@@ -366,9 +369,13 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
     
     @printf("%4d | %.2e | %.2e | %.2e | %.4f | %.4f\n", iter, primal_res_norm, dual_res_norm, mu, alpha_primal, alpha_dual)
     
+    println("Before update xs max: $(maximum(xs)) min: $(minimum(xs))")
     xs = xs .+ (alpha_primal * delta_xs)
+    println("After update xs max: $(maximum(xs)) min: $(minimum(xs))")
     lam = lam .+ (alpha_dual * delta_lam)
+    println("Before update s max: $(maximum(s)) min: $(minimum(s))")
     s = s .+ (alpha_dual * delta_s)
+    println("After update s max: $(maximum(s)) min: $(minimum(s))")
     
     if any(xs .<= 0) || any(s .<= 0)
       println("Warning: Numerical issues; enforcing positivity")
