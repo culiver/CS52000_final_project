@@ -208,11 +208,12 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
   println("Standard form: $(size(As,2)) variables, $(size(As,1)) equality constraints")
   
   # ---------------------------------------------------------------------------
-  # Step 2: Initialization of the Interior-Point Method
+  # Step 2: Robust Initialization of the Interior-Point Method
   # ---------------------------------------------------------------------------
-  
-  println("Initializing interior point")
-  # Scale original m rows for numerical stability.
+
+  println("Initializing interior point with robust method")
+
+  # --- Row scaling for numerical stability ---
   row_norms = zeros(m)
   for i in 1:m
     rnorm = norm(As[i, :])
@@ -222,9 +223,9 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
       bs[i] /= rnorm
     end
   end
-  
+
+  # --- Column scaling for numerical stability ---
   n_std = size(As, 2)
-  # Scale all columns for numerical stability.
   col_norms = zeros(n_std)
   for j in 1:n_std
     cnorm = norm(As[:, j])
@@ -234,19 +235,49 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
       cs[j] *= cnorm
     end
   end
-  
-  # Initialization for the interior-point method.
+
+  # --- Robust Initialization ---
+  # Initialize primal (xs), dual (lam), and slack (s) variables
   xs = ones(n_std)
   lam = zeros(size(As, 1))
   s = ones(n_std)
-  
+
+  # Regularization parameter (epsilon) helps stabilize ill-conditioned systems.
+  reg_param = 1e-8
+
+  # Compute dual variables robustly with a regularized system.
+  # This solves (A * A' + εI) λ = A * c, improving the conditioning.
   try
-    lam = (As * As') \ (As * cs)
-  catch
-    println("Warning: Using zeros for initial dual variables")
+    dual_matrix = As * As' + reg_param * I(size(As, 1))
+    lam = dual_matrix \ (As * cs)
+  catch e
+    println("Warning: Regularized dual solver failed; using zeros for dual variables")
+    lam = zeros(size(As, 1))
   end
-  s = max.(cs .- As' * lam, 1e-1)
-  
+
+  # Compute initial slack variables:
+  # s = c - A' * λ. A floor value is imposed to keep s strictly positive.
+  s = cs .- As' * lam
+  s = max.(s, 1e-1)
+
+  # --- Optional: Primal Correction ---
+  # Evaluate how well the initial x satisfies the equality constraints.
+  primal_res = As * xs - bs
+  if norm(primal_res) > 1e-8
+    # Compute a correction term using a similar regularized system.
+    try
+      correction = (As * As' + reg_param * I(size(As, 1))) \ primal_res
+      xs = xs - As' * correction
+    catch
+      println("Warning: Primal correction failed, proceeding with initial xs")
+    end
+  end
+
+  # Ensure that both xs and s are strictly positive.
+  xs = max.(xs, 1e-8)
+  s = max.(s, 1e-8)
+
+  # Compute the initial duality measure (complementarity gap).
   initial_mu = dot(xs, s) / n_std
   println("Initial duality measure: $initial_mu")
   
