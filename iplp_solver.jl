@@ -213,29 +213,7 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
   # ---------------------------------------------------------------------------
 
   println("Initializing interior point with robust method")
-
-  # --- Row scaling for numerical stability ---
-  row_norms = zeros(m)
-  for i in 1:m
-    rnorm = norm(As[i, :])
-    row_norms[i] = rnorm
-    if rnorm > 1e-10
-      As[i, :] ./= rnorm
-      bs[i] /= rnorm
-    end
-  end
-
-  # --- Column scaling for numerical stability ---
   n_std = size(As, 2)
-  col_norms = zeros(n_std)
-  for j in 1:n_std
-    cnorm = norm(As[:, j])
-    col_norms[j] = cnorm
-    if cnorm > 1e-10
-      As[:, j] ./= cnorm
-      cs[j] *= cnorm
-    end
-  end
 
   # --- Robust Initialization ---
   # Initialize primal (xs), dual (lam), and slack (s) variables
@@ -498,14 +476,56 @@ println("LPnetlib/lp_afiro matrix size: ", size(md.A))
 problem = convert_matrixdepot(md)
 
 # Set the tolerance for convergence.
-tol = 1e-6
+tol = 1e-8
 
 # Call the interior-point LP solver.
-solution = iplp(problem, tol; maxit=1000)
+solution_iplp = iplp(problem, tol; maxit=1000)
 
-if solution.flag
+if solution_iplp.flag
   println("Interior-point solver converged!")
-  println("Optimal solution x: ", solution.x)
+  println("Optimal solution x: ", solution_iplp.x)
 else
   println("Interior-point solver did not converge.")
 end
+
+# Import the HiGHS solver function without running tests
+include("HiGHS_soler.jl")
+# Solve the problem using HiGHS
+solution_HiGHS = solve_lp_highs(problem)
+x_HiGHS, obj_HiGHS = solution_HiGHS
+println("Solution from HiGHS: ", x_HiGHS)
+
+# Calculate objective value for iplp (make sure to use original problem objective)
+obj_iplp = dot(problem.c, solution_iplp.x)
+
+# Print solution comparison
+println("\n========== SOLUTION COMPARISON ==========")
+println("IPLP objective value: ", obj_iplp)
+println("HiGHS objective value: ", obj_HiGHS)
+println("Objective difference (iplp - HiGHS): ", obj_iplp - obj_HiGHS)
+println("Relative objective difference: ", abs(obj_iplp - obj_HiGHS) / max(abs(obj_HiGHS), 1e-10))
+
+# Compare solution vectors
+x_diff = solution_iplp.x - x_HiGHS
+x_diff_norm = norm(x_diff)
+println("\nSolution difference (L2 norm): ", x_diff_norm)
+println("Relative solution difference: ", x_diff_norm / max(norm(x_HiGHS), 1e-10))
+
+# Check constraint satisfaction
+constr_viol_iplp = norm(problem.A * solution_iplp.x - problem.b)
+constr_viol_HiGHS = norm(problem.A * x_HiGHS - problem.b)
+println("\nConstraint violation for IPLP: ", constr_viol_iplp)
+println("Constraint violation for HiGHS: ", constr_viol_HiGHS)
+
+# Print the 5 largest differences in solution components
+if length(x_diff) > 0
+    abs_diff = abs.(x_diff)
+    sorted_indices = sortperm(abs_diff, rev=true)
+    
+    println("\nTop 5 largest differences in solution components:")
+    for i in 1:min(5, length(sorted_indices))
+        idx = sorted_indices[i]
+        println("  x[$idx]: IPLP = $(solution_iplp.x[idx]), HiGHS = $(x_HiGHS[idx]), diff = $(x_diff[idx])")
+    end
+end
+

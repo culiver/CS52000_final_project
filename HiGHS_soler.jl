@@ -55,43 +55,48 @@ function solve_lp_highs(prob::IplpProblem)
 end
 
 # -------------------------------------------------------------------
-# Test All LPnetlib Matrices Using HiGHS
+# Test All LPnetlib Matrices Using HiGHS (now wrapped in a function)
 # -------------------------------------------------------------------
 
-# List of LPnetlib matrix names (as given in the project description)
-matrix_names = ["afiro", "brandy", "fit1d", "adlittle", "agg", "ganges", "stocfor1", "25fv47", "chemcom"]
+function run_tests()
+    # List of LPnetlib matrix names (as given in the project description)
+    matrix_names = ["afiro", "brandy", "fit1d", "adlittle", "agg", "ganges", "stocfor1", "25fv47", "chemcom"]
 
-for name in matrix_names
-    # For matrices starting with a digit (like "25fv47"), use "LPnetlib/<name>"
-    # Otherwise, prepend "lp_" (e.g. "afiro" becomes "LPnetlib/lp_afiro")
-    matrix_id = (name == "chemcom") ? "LPnetlib/lpi_" * name : "LPnetlib/lp_" * name
-    
-    println("-----------------------------------------------------")
-    println("Processing matrix: ", matrix_id)
-    
-    md = nothing  # Declare md outside the try-catch block
-    try
-        md = mdopen(matrix_id)
-    catch e
-        println("  ERROR loading ", matrix_id, ": ", e)
-        continue
-    end
+    for name in matrix_names
+        # For matrices starting with a digit (like "25fv47"), use "LPnetlib/<n>"
+        # Otherwise, prepend "lp_" (e.g. "afiro" becomes "LPnetlib/lp_afiro")
+        matrix_id = (name == "chemcom") ? "LPnetlib/lpi_" * name : "LPnetlib/lp_" * name
+        
+        println("-----------------------------------------------------")
+        println("Processing matrix: ", matrix_id)
+        
+        md = nothing  # Declare md outside the try-catch block
+        try
+            md = mdopen(matrix_id)
+        catch e
+            println("  ERROR loading ", matrix_id, ": ", e)
+            continue
+        end
 
-    # If for some reason md is still nothing, skip this matrix.
-    if md === nothing
-        println("  md is undefined for ", matrix_id)
-        continue
-    end
+        # If for some reason md is still nothing, skip this matrix.
+        if md === nothing
+            println("  md is undefined for ", matrix_id)
+            continue
+        end
 
-    println("  Matrix size: ", size(md.A))
-    
-    # Convert the MatrixDepot descriptor to our problem format.
-    prob = convert_matrixdepot(md)
-    
-    # Solve the LP using HiGHS (simplex).
-    result = solve_lp_highs(prob)
-    if result !== nothing
-        x, obj = result
-        println("  Finished ", matrix_id, " with objective: ", obj)
+        println("  Matrix size: ", size(md.A))
+        
+        # Convert the MatrixDepot descriptor to our problem format.
+        prob = convert_matrixdepot(md)
+        
+        # Solve the LP using HiGHS (simplex).
+        result = solve_lp_highs(prob)
+        if result !== nothing
+            x, obj = result
+            println("  Finished ", matrix_id, " with objective: ", obj)
+        end
     end
 end
+
+# Uncomment the line below to run the tests
+# run_tests()
