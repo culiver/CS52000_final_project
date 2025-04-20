@@ -1,4 +1,5 @@
 using MatrixDepot, SparseArrays, LinearAlgebra, Printf
+using LDLFactorizations
 
 # =============================================================================
 # Define Data Structures for the LP Solver Interface
@@ -316,97 +317,48 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
       best_x = copy(xs)
     end
     
-    # Predictor step.
-    X = Diagonal(xs)
-    S = Diagonal(s)
-    d = xs ./ max.(s, 1e-8)
-    D = Diagonal(d)
+    ### Predictor step.
+    # Step 1: Predictor step
+    xs = max.(xs, 1e-8)
+    s  = max.(s, 1e-8) 
+    delta_xs_aff, delta_lam_aff, delta_s_aff = solve_kkt_augmented(As, xs, lam, s, cs, bs, 0.0)
 
-    println("D max: $(maximum(D)) min: $(minimum(D))")
-    
-    # Regularization parameters - now properly defined as scalars
-    delta_x_param = 1e-8
-    delta_s_param = 1e-8
-    
-    rhs = r_p .- As * (D * r_d)
-    reg_matrix = As * D * As' + delta_s_param * I(size(As,1))
-    delta_lam_aff = zeros(size(As, 1))
-    localF = nothing
-    try
-      localF = cholesky(Symmetric(reg_matrix))
-      delta_lam_aff = localF \ rhs
-    catch e
-      println("  Warning: Cholesky failed, using QR")
-      delta_lam_aff = reg_matrix \ rhs
-    end
-    
-    delta_s_aff = r_d .+ As' * delta_lam_aff
-    delta_xs_aff = -D * delta_s_aff
-    
-    alpha_primal_aff = compute_step_length(xs, delta_xs_aff)
-    alpha_dual_aff = compute_step_length(s, delta_s_aff)
-    
-    xs_aff = xs .+ alpha_primal_aff * delta_xs_aff
-    s_aff = s .+ alpha_dual_aff * delta_s_aff
-    mu_aff = dot(xs_aff, s_aff) / n_std
-    
+    alpha_aff_primal = compute_step_length(xs, delta_xs_aff)
+    alpha_aff_dual   = compute_step_length(s, delta_s_aff)
+
+    xs_aff = xs .+ alpha_aff_primal * delta_xs_aff
+    s_aff  = s .+ alpha_aff_dual   * delta_s_aff
+    mu     = dot(xs, s) / length(xs)
+    mu_aff = dot(xs_aff, s_aff) / length(xs)
+
     sigma = (mu_aff / mu)^3
-    println("mu_aff: $mu_aff sigma: $sigma")
-    
-    comp_correction = delta_xs_aff .* delta_s_aff .- sigma * mu
-    rhs_cor = -As * (D * comp_correction)
-    
-    delta_lam_cor = zeros(size(As, 1))
-    try
-      if localF !== nothing
-        delta_lam_cor = localF \ rhs_cor
-      else
-        delta_lam_cor = reg_matrix \ rhs_cor
-      end
-    catch e
-      delta_lam_cor = reg_matrix \ rhs_cor
-    end
-    
-    delta_s_cor = As' * delta_lam_cor
-    delta_xs_cor = -D * (delta_s_cor .+ comp_correction)
-    
-    delta_xs = delta_xs_aff .+ delta_xs_cor
-    delta_lam = delta_lam_aff .+ delta_lam_cor
-    delta_s = delta_s_aff .+ delta_s_cor
-    
+
+    # Step 2: Compute correction RHS
+    r_c = As' * lam + s - cs
+    r_b = As * xs - bs
+    comp_corr = clamp.(delta_xs_aff .* delta_s_aff, -1e6, 1e6)
+    r_μ = xs .* s .+ comp_corr .- sigma * mu * ones(length(xs))
+    rhs_corr = -vcat(r_c, r_b, r_μ)
+
+    # Step 3: Corrector step with computed sigma
+    xs = max.(xs, 1e-8)
+    s  = max.(s, 1e-8)
+    delta_xs, delta_lam, delta_s = solve_kkt_augmented(As, xs, lam, s, cs, bs, sigma, rhs_corr)
+
+    # Step 4: Compute step lengths
     alpha_primal = alpha_safety * compute_step_length(xs, delta_xs)
-    alpha_dual = alpha_safety * compute_step_length(s, delta_s)
-    
-    min_step = 1e-5
-    if alpha_primal < min_step && alpha_dual < min_step
-      println("  Warning: Step sizes too small, taking centering step")
-      sigma = 0.8
-      comp_correction = -sigma * mu
-      rhs_cor = -As * (D * comp_correction)
-      try
-        if localF !== nothing
-          delta_lam = localF \ rhs_cor
-        else
-          delta_lam = reg_matrix \ rhs_cor
-        end
-      catch
-        delta_lam = reg_matrix \ rhs_cor
-      end
-      delta_s = As' * delta_lam
-      delta_xs = -D * (delta_s .+ comp_correction)
-      alpha_primal = alpha_safety * compute_step_length(xs, delta_xs)
-      alpha_dual = alpha_safety * compute_step_length(s, delta_s)
-    end
+    alpha_dual   = alpha_safety * compute_step_length(s, delta_s)
+
     
     @printf("%4d | %.2e | %.2e | %.2e | %.4f | %.4f\n", iter, primal_res_norm, dual_res_norm, mu, alpha_primal, alpha_dual)
     
-    println("Before update xs max: $(maximum(xs)) min: $(minimum(xs))")
+    # println("Before update xs max: $(maximum(xs)) min: $(minimum(xs))")
     xs = xs .+ (alpha_primal * delta_xs)
-    println("After update xs max: $(maximum(xs)) min: $(minimum(xs))")
+    # println("After update xs max: $(maximum(xs)) min: $(minimum(xs))")
     lam = lam .+ (alpha_dual * delta_lam)
-    println("Before update s max: $(maximum(s)) min: $(minimum(s))")
+    # println("Before update s max: $(maximum(s)) min: $(minimum(s))")
     s = s .+ (alpha_dual * delta_s)
-    println("After update s max: $(maximum(s)) min: $(minimum(s))")
+    # println("After update s max: $(maximum(s)) min: $(minimum(s))")
     
     if any(xs .<= 0) || any(s .<= 0)
       println("Warning: Numerical issues; enforcing positivity")
@@ -475,13 +427,72 @@ function compute_step_length(x, dx)
   return alpha
 end
 
+function solve_kkt_augmented(As, xs, lam, s, cs, bs, σ, custom_rhs=nothing)
+  n = length(xs)
+  m = size(As, 1)
+  I_n = spdiagm(0 => ones(n))
+  I_m = spdiagm(0 => ones(m))
+  reg_eps = 1e-10  # Regularization strength
+
+  # Clamp xs and s to stay strictly positive and bounded
+  xs = clamp.(xs, 1e-8, 1e8)
+  s  = clamp.(s, 1e-8, 1e8)
+
+  S = spdiagm(0 => s)
+  X = spdiagm(0 => xs)
+
+  # Build the block rows of the KKT matrix
+  K_top = [spzeros(n,n) As' I_n]
+  K_mid = [As spzeros(m,m) spzeros(m,n)]
+  K_bot = [S spzeros(n,m) X]
+  K = [K_top; K_mid; K_bot]
+
+  # Add diagonal regularization to entire system
+  K += reg_eps * spdiagm(0 => ones(n + m + n))
+
+  # Construct RHS
+  if custom_rhs === nothing
+      r_b = As * xs - bs
+      r_c = As' * lam + s - cs
+      μ = dot(xs, s) / n
+      r_μ = xs .* s .- σ * μ * ones(n)
+      rhs = -vcat(r_c, r_b, r_μ)
+  else
+      rhs = custom_rhs
+  end
+
+  # Try LDL factorization
+  Δ = nothing
+  try
+      F = ldl(K)
+      if F.status == :OK
+          Δ = F \ rhs
+      else
+          println("⚠️  LDL failed (status: $(F.status)), using QR fallback.")
+      end
+  catch e
+      println("⚠️  LDL factorization error: $(e). Falling back to QR.")
+  end
+
+  if Δ === nothing
+      Δ = K \ rhs  # fallback to sparse QR or LU
+  end
+
+  delta_xs = Δ[1:n]
+  delta_lam = Δ[n+1:n+m]
+  delta_s = Δ[n+m+1:end]
+
+  return delta_xs, delta_lam, delta_s
+end
+
+
 # =============================================================================
 # Test the Setup Using a MatrixDepot LPnetlib Problem
 # =============================================================================
 
 # Download an LP problem from LPnetlib.
-md = mdopen("LPnetlib/lp_afiro")
-println("LPnetlib/lp_afiro matrix size: ", size(md.A))
+md = mdopen("LPnetlib/brandy")
+println("LPnetlib/brandy matrix size: ", size(md.A))
 
 # Convert the downloaded matrix descriptor to our problem format.
 problem = convert_matrixdepot(md)
@@ -490,7 +501,7 @@ problem = convert_matrixdepot(md)
 tol = 1e-6
 
 # Call the interior-point LP solver.
-solution = iplp(problem, tol; maxit=100)
+solution = iplp(problem, tol; maxit=1000)
 
 if solution.flag
   println("Interior-point solver converged!")
