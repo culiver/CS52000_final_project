@@ -491,8 +491,8 @@ end
 # =============================================================================
 
 # Download an LP problem from LPnetlib.
-md = mdopen("LPnetlib/brandy")
-println("LPnetlib/brandy matrix size: ", size(md.A))
+md = mdopen("LPnetlib/lp_afiro")
+println("LPnetlib/lp_afiro matrix size: ", size(md.A))
 
 # Convert the downloaded matrix descriptor to our problem format.
 problem = convert_matrixdepot(md)
