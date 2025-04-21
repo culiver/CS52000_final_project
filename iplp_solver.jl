@@ -412,10 +412,6 @@ function solve_kkt_augmented(As, xs, lam, s, cs, bs, σ, custom_rhs=nothing)
   I_m = spdiagm(0 => ones(m))
   reg_eps = 1e-10  # Regularization strength
 
-  # Clamp xs and s to stay strictly positive and bounded
-  xs = clamp.(xs, 1e-8, 1e8)
-  s  = clamp.(s, 1e-8, 1e8)
-
   S = spdiagm(0 => s)
   X = spdiagm(0 => xs)
 
@@ -439,22 +435,7 @@ function solve_kkt_augmented(As, xs, lam, s, cs, bs, σ, custom_rhs=nothing)
       rhs = custom_rhs
   end
 
-  # Try LDL factorization
-  Δ = nothing
-  try
-      F = ldl(K)
-      if F.status == :OK
-          Δ = F \ rhs
-      else
-          println("⚠️  LDL failed (status: $(F.status)), using QR fallback.")
-      end
-  catch e
-      println("⚠️  LDL factorization error: $(e). Falling back to QR.")
-  end
-
-  if Δ === nothing
-      Δ = K \ rhs  # fallback to sparse QR or LU
-  end
+  Δ = K \ rhs
 
   delta_xs = Δ[1:n]
   delta_lam = Δ[n+1:n+m]
@@ -498,18 +479,16 @@ for name in matrix_names
   tol = 1e-6
 
   # Call the interior-point LP solver.
-  solution_iplp = iplp(problem, tol; maxit=1000)
+  solution_iplp = iplp(problem, tol; maxit=100)
 
   if solution_iplp.flag
     println("Interior-point solver converged!")
-    println("Optimal solution x: ", solution_iplp.x)
 
     # Import the HiGHS solver function without running tests
     include("HiGHS_soler.jl")
     # Solve the problem using HiGHS
     solution_HiGHS = solve_lp_highs(problem)
     x_HiGHS, obj_HiGHS = solution_HiGHS
-    println("Solution from HiGHS: ", x_HiGHS)
 
     # Calculate objective value for iplp (make sure to use original problem objective)
     obj_iplp = dot(problem.c, solution_iplp.x)
