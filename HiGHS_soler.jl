@@ -27,7 +27,7 @@ end
 function solve_lp_highs(prob::IplpProblem)
     model = Model(HiGHS.Optimizer)  # Use HiGHS as the solver
     set_optimizer_attribute(model, "solver", "simplex")  # set HiGHS to use simplex
-    
+    set_optimizer_attribute(model, "log_to_console", false)
     n = length(prob.c)
     
     # Define variables with bounds using the converted problem data.
