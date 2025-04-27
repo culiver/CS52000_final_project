@@ -1,5 +1,4 @@
 using MatrixDepot, SparseArrays, LinearAlgebra, Printf
-using LDLFactorizations
 
 # =============================================================================
 # Define Data Structures for the LP Solver Interface
