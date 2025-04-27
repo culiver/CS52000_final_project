@@ -223,6 +223,7 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
 
   # Regularization parameter (epsilon) helps stabilize ill-conditioned systems.
   reg_param = 1e-8
+  W_max  = 1e8
 
   # Compute dual variables robustly with a regularized system.
   # This solves (A * A' + εI) λ = A * c, improving the conditioning.
@@ -253,8 +254,8 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
   end
 
   # Ensure that both xs and s are strictly positive.
-  xs = max.(xs, 1e-8)
-  s = max.(s, 1e-8)
+  xs = max.(xs, 1e-12)
+  s = max.(s, 1e-12)
 
   # Compute the initial duality measure (complementarity gap).
   initial_mu = dot(xs, s) / n_std
@@ -283,6 +284,18 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
     primal_res_norm = norm(r_p) / max(1.0, norm(bs))
     dual_res_norm = norm(r_d) / max(1.0, norm(cs))
     total_res_norm = norm([r_p; r_d; xs .* s]) / max(1.0, norm([bs; cs]))
+
+    cur_size = sum(abs, xs) + sum(abs, s)
+
+    # ---- Blow-up / infeasibility test ---------------------------------------
+    if cur_size > W_max
+        println("Iter $iter : ‖(x,s)‖₁ = $cur_size  > W_max = $W_max.  ")
+        println("Blow-up condition triggered ⇒ problem is (primal OR dual) infeasible.")
+        converged = false
+        break
+    end
+    # -------------------------------------------------------------------------
+
     
     if total_res_norm <= tol && mu <= tol
       converged = true
@@ -297,8 +310,8 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
     
     ### Predictor step.
     # Step 1: Predictor step
-    xs = max.(xs, 1e-8)
-    s  = max.(s, 1e-8) 
+    xs = max.(xs, 1e-12)
+    s  = max.(s, 1e-12) 
     delta_xs_aff, delta_lam_aff, delta_s_aff = solve_kkt_augmented(As, xs, lam, s, cs, bs, 0.0)
 
     alpha_aff_primal = compute_step_length(xs, delta_xs_aff)
@@ -319,8 +332,8 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
     rhs_corr = -vcat(r_c, r_b, r_μ)
 
     # Step 3: Corrector step with computed sigma
-    xs = max.(xs, 1e-8)
-    s  = max.(s, 1e-8)
+    xs = max.(xs, 1e-12)
+    s  = max.(s, 1e-12)
     delta_xs, delta_lam, delta_s = solve_kkt_augmented(As, xs, lam, s, cs, bs, sigma, rhs_corr)
 
     # Step 4: Compute step lengths
@@ -345,7 +358,7 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
     end
   end
   
-  if !converged
+  if !converged && iter >= maxit
     println("Maximum iterations reached. Using best solution with residual: $best_residual")
     xs = best_x
   end
@@ -448,12 +461,14 @@ end
 # =============================================================================
 # Test the Setup Using a MatrixDepot LPnetlib Problem
 # =============================================================================
-matrix_names = ["afiro", "brandy", "fit1d", "adlittle", "agg", "ganges", "stocfor1", "25fv47", "chemcom"]
+feasible_matrix_names = ["afiro", "brandy", "fit1d", "adlittle", "agg", "ganges", "stocfor1", "25fv47"]
+infeasible_matrix_names = ["chemcom", "woodw", "bgdbg1", "bgetam", "bgindy", "bgprtr", "box1"]
+matrix_names = vcat(feasible_matrix_names, infeasible_matrix_names)
 
 for name in matrix_names
   # For matrices starting with a digit (like "25fv47"), use "LPnetlib/<n>"
   # Otherwise, prepend "lp_" (e.g. "afiro" becomes "LPnetlib/lp_afiro")
-  matrix_id = (name == "chemcom") ? "LPnetlib/lpi_" * name : "LPnetlib/lp_" * name
+  matrix_id = (name in infeasible_matrix_names) ? "LPnetlib/lpi_" * name : "LPnetlib/lp_" * name
   
   println("-----------------------------------------------------")
   println("Processing matrix: ", matrix_id)
@@ -476,7 +491,7 @@ for name in matrix_names
   problem = convert_matrixdepot(md)
 
   # Set the tolerance for convergence.
-  tol = 1e-6
+  tol = 1e-8
 
   # Call the interior-point LP solver.
   solution_iplp = iplp(problem, tol; maxit=100)
