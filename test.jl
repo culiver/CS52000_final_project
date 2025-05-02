@@ -1,4 +1,4 @@
-include("iplp_solver.jl")
+include("project2.jl")
 
 # =============================================================================
 # Test the Setup Using a MatrixDepot LPnetlib Problem
@@ -43,7 +43,7 @@ for name in matrix_names
     println("Interior-point solver converged!")
 
     # Import the HiGHS solver function without running tests
-    include("HiGHS_soler.jl")
+    include("HiGHS_solver.jl")
     # Solve the problem using HiGHS
     solution_HiGHS = solve_lp_highs(problem)
     x_HiGHS, obj_HiGHS = solution_HiGHS
