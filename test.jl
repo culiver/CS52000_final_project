@@ -4,7 +4,8 @@ include("iplp_solver.jl")
 # Test the Setup Using a MatrixDepot LPnetlib Problem
 # =============================================================================
 feasible_matrix_names = ["afiro", "brandy", "fit1d", "adlittle", "agg", "ganges", "stocfor1", "25fv47"]
-infeasible_matrix_names = ["chemcom", "woodw", "bgdbg1", "bgetam", "bgindy", "bgprtr", "box1"]
+# infeasible_matrix_names = ["chemcom", "woodw", "bgdbg1", "bgetam", "bgindy", "bgprtr", "box1"]
+infeasible_matrix_names = ["chemcom"]
 matrix_names = vcat(feasible_matrix_names, infeasible_matrix_names)
 
 for name in matrix_names

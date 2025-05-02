@@ -280,9 +280,9 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
     r_d = cs .- As' * lam .- s            # dual residual
     mu = dot(xs, s) / n_std
     
-    primal_res_norm = norm(r_p) / max(1.0, norm(bs))
-    dual_res_norm = norm(r_d) / max(1.0, norm(cs))
-    total_res_norm = norm([r_p; r_d; xs .* s]) / max(1.0, norm([bs; cs]))
+    primal_res_norm = norm(r_p) / norm(bs)
+    dual_res_norm = norm(r_d) / norm(cs)
+    total_res_norm = norm([r_p; r_d; xs .* s]) / norm([bs; cs])
 
     cur_size = sum(abs, xs) + sum(abs, s)
 
@@ -383,7 +383,7 @@ function iplp(Problem::IplpProblem, tol; maxit=100)
   end
   
   # Check constraint and bound violations.
-  original_constraint_violation = norm(A * x - b_orig) / max(1.0, norm(b_orig))
+  original_constraint_violation = norm(A * x - b_orig) / norm(b_orig)
   bound_violation = 0.0
   for i in 1:n
     if isfinite(lo[i]) && x[i] < lo[i] - 1e-8
